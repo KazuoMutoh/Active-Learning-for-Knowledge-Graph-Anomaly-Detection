@@ -3,3 +3,5 @@ pandas
 pykeen
 jupyter
 openai
+langchain
+langchain-openai

@@ -1,11 +1,15 @@
 import os
 import pickle
 import networkx as nx
+import numpy as np
 from openai import OpenAI
 from typing import List, Dict, Tuple
 from settings import OPENAI_API_KEY
 from tqdm import tqdm
 from pykeen.triples.triples_numeric_literals_factory import TriplesNumericLiteralsFactory
+from pykeen.models.multimodal.distmult_literal import DistMultLiteral
+from pykeen.models.multimodal.base import LiteralModel
+from pykeen.pipeline import pipeline
 
 # variables
 os.environ['OPENAI_API_KEY'] = OPENAI_API_KEY
@@ -19,7 +23,16 @@ class DataSet:
     def __init__(self):
         pass
 
-    def load(self, dir_triples:str):
+    def to_pickle(self, filename):
+        with open(filename, 'wb') as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def from_pickle(cls, filename):
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+
+    def from_files(self, dir_triples:str):
         """
         Initilize data set.
 
@@ -36,7 +49,7 @@ class DataSet:
         """
 
         dict_entity2text = {}
-        with open(f'{dir_triples}/entity2text.txt', 'r') as fin:
+        with open(f'{dir_triples}/entity2textlong.txt', 'r') as fin:
             for line in fin:
                 line = line.replace('\n', '')
                 words = line.split('\t')
@@ -98,7 +111,28 @@ class DataSet:
         self.test = KnowledgeGraph(list_triples_test, 
                                     dict_entity2text_test,
                                     dict_relation2text)
+        
+    def set_text_embeddings(self):
 
+        self.train._set_text_embeddings()
+        self.test._set_text_embeddings()
+
+    def train_graph_embeddings(self, model:LiteralModel, **kwargs):
+
+        self.model = model
+
+        triples_train = self.train._to_pykeen_triples_factory()
+        triples_test = self.test._to_pykeen_triples_factory()
+
+        self.graph_embedding = \
+            pipeline(training=triples_train, testing=triples_test, model=model,**kwargs)
+        
+    def get_embedding_socre(self):
+        return self.graph_embedding.get_metric()
+    
+    def update_graph_embedding(self, **kwargs):
+        self.train_graph_embeddings(self.model, **kwargs)
+    
 
 class KnowledgeGraph(nx.Graph):
     """
@@ -112,30 +146,39 @@ class KnowledgeGraph(nx.Graph):
         
         super().__init__()
 
+        self.list_triples = list_triples
         self.map_entity2text = map_entity2text
         self.map_relation2text = map_relation2text
+
+        self._create()
+
+    def _create(self):
+
+        self.num_triples = len(self.list_triples)
+        self.num_entities = len(self.map_entity2text)
+        self.num_relations = len(self.map_relation2text)
         
         self.map_id2entity = {}
         self.map_entity2nid = {}
-        for nid, (entity, text) in enumerate(map_entity2text.items()):
+        for nid, (entity, text) in enumerate(self.map_entity2text.items()):
             self.add_node(nid, name=entity, text=text)
             self.map_id2entity[nid] = entity
             self.map_entity2nid[entity] = nid
 
         self.map_id2relation = {}
         self.map_relation2id = {}
-        for rid, relation in enumerate(map_relation2text.keys()):
+        for rid, relation in enumerate(self.map_relation2text.keys()):
             self.map_relation2id[relation] = rid
             self.map_id2relation[rid] = relation
 
-        for h, r, t in list_triples:
+        for h, r, t in self.list_triples:
             nid_h = self.map_entity2nid[h]
             nid_t = self.map_entity2nid[t]
             self.add_edge(nid_h, nid_t, 
-                          name=r, text=map_relation2text[r], 
+                          name=r, text=self.map_relation2text[r], 
                           rid=self.map_relation2id[r])
 
-    def set_text_embedding(self, 
+    def _set_text_embeddings(self, 
                            embedding_model:str = 'text-embedding-3-small', 
                            node_ids: List[int] = None):
         """
@@ -169,6 +212,8 @@ class KnowledgeGraph(nx.Graph):
                 print(f'Exception occurs when embedding {nid}:{text}\n{e}')
             self.map_nid2textemb[nid] = embedding
 
+        self.dim_embedding = len(embedding)
+
         print('calculate text embedding for relations connected to specified entities.')
         self.map_rid2textemb = {}
         for rid in tqdm(set_target_rid):
@@ -189,80 +234,76 @@ class KnowledgeGraph(nx.Graph):
         embedding = response.data[0].embedding
         return embedding
 
-    def to_pykeen_triples_factory(self):
+    def _to_pykeen_triples_factory(self):
         """
-        Convert the knowledge graph to a PyKEEN NumericTriplesFactory with embeddings.
+        Convert the knowledge graph to a PyKEEN NumericTriplesFactory with text-embeddings.
         """
-        triples = []
-        for u, v, data in self.edges(data=True):
-            h = u
-            t = v
-            r = data['name']
-            triples.append((h, r, t))
+
+        numeric_literals = np.zeros((self.num_entities,self.dim_embedding))
+        for nid, embeddings in self.map_nid2textemb.items():
+            numeric_literals[nid,:] = embeddings
+
+        print(numeric_literals[0])
 
         # Create a NumericTriplesFactory
         triples_factory = TriplesNumericLiteralsFactory.\
-            from_labeled_triples(triples, )
-
-        # Add embeddings to the triples factory
-        #entity_embeddings = {nid: self.nodes[nid]['embedding'] for nid in self.nodes}
-        #relation_embeddings = {data['name']: self.edges[u, v]['embedding'] for u, v, data in self.edges(data=True)}
-        #triples_factory.entity_embeddings = entity_embeddings
-        #triples_factory.relation_embeddings = relation_embeddings
-
+            from_labeled_triples(self.list_triples, 
+                                 numeric_literals)
+        
         return triples_factory
 
-'''
-def main():
+    def add_triples(self, triples:List[Dict]):
 
-    # load data set
-    # Knowlegde
+        list_triples = []
+        map_entity2text = []
+        for triple in triples:
+            
+            list_triples.append(\
+                (triple['head_name'], triple['relation_name'], triple['tail_name'])
+            )
 
-    # train knoweldge graph embedding
-    # model = EmbeddingModel()
-    # train(model, triples_factory)
+            map_entity2text[triple['tail_name']] = triple['tail_text']
 
-    # create query
-    #budget = 10
-    #score = 0
-    #while budget > 0:
-    #    queries = create_query(model)
-    #    triples_to_add = retrieve_information(queries, documents)
-    #    update_embedding_model(model, triples_to_add)
-    #    score = calculate_score(model)
-    #    budget -= len(queries)
-'''
+        self.list_triples += list_triples
+        self.map_entity2text |= map_entity2text
+
+        self._create()
+
+    def search_entity(self, name:str):
+        for nid, node in self.nodes(data=True):
+            _name = node.get('name')
+            if name is not None and name == _name:
+                return node
+
 # %%
 if __name__ == "__main__":
     #%%
+    init = True
+
     dataset = DataSet()
-    dataset.load('./data/umls')
-
-    dataset.train.set_text_embedding()
-
-    for nid, node in list(dataset.train.nodes(data=True))[:2]:
-        print(nid, node)
-
-    #print(nx.to_pandas_edgelist(dataset.train).head())
-
-    #print(dataset.train.map_nid2textemb)
-    #print(dataset.train.map_rid2textemb)
-
-    with open('dataset.pkl', 'bw') as fout:
-        pickle.dump(dataset, fout)
+    dataset.from_files('./data/umls')
+    dataset.to_pickle('dataset_umls_light.pkl')
 
     '''
-    with open('dataset.pkl', 'br') as fin:
-        dataset1 = pickle.load(fin)
+    if init:
 
-    for nid, node in list(dataset1.train.nodes(data=True))[:2]:
-        print(nid, node)
+        dataset.from_files('./data/umls')
+        dataset.set_text_embeddings()
 
-    print(nx.to_pandas_edgelist(dataset1.train).head())
+        for nid, node in list(dataset.train.nodes(data=True))[:2]:
+            print(nid, node)
 
-    print(dataset1.train.map_nid2textemb)
-    print(dataset1.train.map_rid2textemb)
-    '''
+        dataset.to_pickle('dataset_umls.pkl')
     
+    else:
+
+        dataset.from_pickle('dataset_umls.pkl')
+
+
+    dataset.train_graph_embeddings(DistMultLiteral, training_kwargs={'num_epochs':1})
+    '''
+
+        
+
 
     
