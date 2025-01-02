@@ -6,7 +6,7 @@ from openai import OpenAI
 from typing import List, Dict, Tuple
 from settings import OPENAI_API_KEY
 from tqdm import tqdm
-from pykeen.triples.triples_numeric_literals_factory import TriplesNumericLiteralsFactory
+from pykeen.triples.triples_numeric_literals_factory import TriplesNumericLiteralsFactory, TriplesFactory
 from pykeen.models.multimodal.distmult_literal import DistMultLiteral
 from pykeen.models.multimodal.base import LiteralModel
 from pykeen.pipeline import pipeline
@@ -24,11 +24,17 @@ class DataSet:
         pass
 
     def to_pickle(self, filename):
+        """
+        Save as pickle.
+        """
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
 
     @classmethod
     def from_pickle(cls, filename):
+        """
+        Load from pickle file
+        """
         with open(filename, 'rb') as f:
             return pickle.load(f)
 
@@ -49,7 +55,7 @@ class DataSet:
         """
 
         dict_entity2text = {}
-        with open(f'{dir_triples}/entity2textlong.txt', 'r') as fin:
+        with open(f'{dir_triples}/entity2text.txt', 'r') as fin:
             for line in fin:
                 line = line.replace('\n', '')
                 words = line.split('\t')
@@ -117,7 +123,7 @@ class DataSet:
         self.train._set_text_embeddings()
         self.test._set_text_embeddings()
 
-    def train_graph_embeddings(self, model:LiteralModel, **kwargs):
+    def train_structural_graph_embeddings(self, model='TransE', **kwargs):
 
         self.model = model
 
@@ -127,14 +133,13 @@ class DataSet:
         self.graph_embedding = \
             pipeline(training=triples_train, testing=triples_test, model=model,**kwargs)
         
-    def get_embedding_socre(self):
+    def get_structural_embedding_score(self):
         return self.graph_embedding.get_metric()
     
-    def update_graph_embedding(self, **kwargs):
+    def update_structural_graph_embedding(self, **kwargs):
         self.train_graph_embeddings(self.model, **kwargs)
     
-
-class KnowledgeGraph(nx.Graph):
+class BaseKnowledgeGraph(nx.Graph):
     """
     A class to represent a knowledge graph using NetworkX.
     """
@@ -149,7 +154,74 @@ class KnowledgeGraph(nx.Graph):
         self.list_triples = list_triples
         self.map_entity2text = map_entity2text
         self.map_relation2text = map_relation2text
+        self.has_text_embedding = False
+        self._create()
 
+    def _create(self):
+
+        self.num_triples = len(self.list_triples)
+        self.num_entities = len(self.map_entity2text)
+        self.num_relations = len(self.map_relation2text)
+        
+        self.map_id2entity = {}
+        self.map_entity2nid = {}
+        for nid, (entity, text) in enumerate(self.map_entity2text.items()):
+            self.add_node(nid, name=entity, text=text)
+            self.map_id2entity[nid] = entity
+            self.map_entity2nid[entity] = nid
+
+        self.map_id2relation = {}
+        self.map_relation2id = {}
+        for rid, relation in enumerate(self.map_relation2text.keys()):
+            self.map_relation2id[relation] = rid
+            self.map_id2relation[rid] = relation
+
+        for h, r, t in self.list_triples:
+            nid_h = self.map_entity2nid[h]
+            nid_t = self.map_entity2nid[t]
+            self.add_edge(nid_h, nid_t, 
+                          name=r, text=self.map_relation2text[r], 
+                          rid=self.map_relation2id[r])
+    
+    def add_triples(self, triples:List[Dict]):
+
+        list_triples = []
+        map_entity2text = []
+        for triple in triples:
+            
+            list_triples.append(\
+                (triple['head_name'], triple['relation_name'], triple['tail_name'])
+            )
+
+            map_entity2text[triple['tail_name']] = triple['tail_text']
+
+        self.list_triples += list_triples
+        self.map_entity2text |= map_entity2text
+
+        self._create()
+
+    def search_entity(self, name:str):
+        for nid, node in self.nodes(data=True):
+            _name = node.get('name')
+            if name is not None and name == _name:
+                return node
+
+class AttributedKnowledgeGraph(BaseKnowledgeGraph):
+    """
+    A class to represent a knowledge graph using NetworkX.
+    """
+
+    def __init__(self, 
+                 list_triples: List[Tuple],
+                 map_entity2text: Dict,
+                 map_relation2text: Dict):
+        
+        super().__init__()
+
+        self.list_triples = list_triples
+        self.map_entity2text = map_entity2text
+        self.map_relation2text = map_relation2text
+        self.has_text_embedding = False
         self._create()
 
     def _create(self):
@@ -223,6 +295,8 @@ class KnowledgeGraph(nx.Graph):
             except Exception as e:
                 print(f'Exception occurs when embedding {rid}:{text}\n{e}')
             self.map_rid2textemb[nid] = embedding
+
+        self.has_text_embedding = True
        
     def _get_embedding(self, 
                        text: str, 
@@ -234,24 +308,49 @@ class KnowledgeGraph(nx.Graph):
         embedding = response.data[0].embedding
         return embedding
 
-    def _to_pykeen_triples_factory(self):
-        """
+    def _to_pykeen_triples_numeric_literal_factory(self):
+        """"
         Convert the knowledge graph to a PyKEEN NumericTriplesFactory with text-embeddings.
         """
+
+        if not self.has_text_embedding:
+            raise Exception('There is no text embedding. Please execute set_text_embeddings.')
 
         numeric_literals = np.zeros((self.num_entities,self.dim_embedding))
         for nid, embeddings in self.map_nid2textemb.items():
             numeric_literals[nid,:] = embeddings
 
+        labeled_triples = []
+        for h,r,t in self.list_triples:
+            labeled_triples.append([h,r,t])
+        labeled_triples = np.array(labeled_triples)
+
+        print(self.list_triples[0])
         print(numeric_literals[0])
+        print(labeled_triples[0])
 
         # Create a NumericTriplesFactory
         triples_factory = TriplesNumericLiteralsFactory.\
-            from_labeled_triples(self.list_triples, 
-                                 numeric_literals)
+            from_labeled_triples(triples = labeled_triples, 
+                                 numeric_triples = numeric_literals)
         
         return triples_factory
+    
+    def _to_pykeen_triples_factory(self):
+        """"
+        Convert the knowledge graph to a PyKEEN TriplesFactory
+        """
+        labeled_triples = []
+        for h,r,t in self.list_triples:
+            labeled_triples.append([h,r,t])
+        labeled_triples = np.array(labeled_triples)
 
+        # Create a TriplesFactory
+        triples_factory = TriplesNumericLiteralsFactory.\
+            from_labeled_triples(triples = labeled_triples)
+        
+        return triples_factory
+    
     def add_triples(self, triples:List[Dict]):
 
         list_triples = []
@@ -275,35 +374,47 @@ class KnowledgeGraph(nx.Graph):
             if name is not None and name == _name:
                 return node
 
+class KelpieKnowledgeGraph(BaseKnowledgeGraph):
+
+    kelpie_model = None
+    kelpie_dataset = None
+    
+    pass
+
 # %%
 if __name__ == "__main__":
     #%%
-    init = True
-
-    dataset = DataSet()
-    dataset.from_files('./data/umls')
-    dataset.to_pickle('dataset_umls_light.pkl')
-
-    '''
+    init = False
+    
     if init:
 
+        dataset = DataSet()
         dataset.from_files('./data/umls')
         dataset.set_text_embeddings()
+
+        #dataset.train._set_text_embeddings()
+        #dataset.test._set_text_embeddings()
+        #print(dataset.train.has_text_embedding)
+        #print(dataset.train.map_nid2textemb)
 
         for nid, node in list(dataset.train.nodes(data=True))[:2]:
             print(nid, node)
 
-        dataset.to_pickle('dataset_umls.pkl')
+        #dataset.train._to_pykeen_triples_factory()
+        #dataset.test._to_pykeen_triples_factory()
+
+        #dataset.train_graph_embeddings(DistMultLiteral, training_kwargs={'num_epochs':1})
+        
+        dataset.to_pickle('dataset_umls_light.pkl')
     
     else:
 
-        dataset.from_pickle('dataset_umls.pkl')
+        dataset = DataSet.from_pickle('dataset_umls_light.pkl')
+        print(type(dataset))
+        if hasattr(dataset, 'train'):
+            print("train attribute exists")
+        else:
+            print("train attribute does not exist")
 
 
     dataset.train_graph_embeddings(DistMultLiteral, training_kwargs={'num_epochs':1})
-    '''
-
-        
-
-
-    

@@ -1,0 +1,6 @@
+[submodule "kopa"]
+	path = kopa
+	url = https://github.com/zjukg/KoPA.git
+[submodule "kelpie"]
+	path = kelpie
+	url = https://github.com/AndRossi/Kelpie.git

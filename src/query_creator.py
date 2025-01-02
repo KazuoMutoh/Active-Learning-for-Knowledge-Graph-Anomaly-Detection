@@ -48,7 +48,8 @@ class RandomQueryCreator(BaseQueryCreator):
             list_query.append(dict_query)
 
         return list_query
-    
+
+
 if __name__ == "__main__":
 
     from graph import DataSet
