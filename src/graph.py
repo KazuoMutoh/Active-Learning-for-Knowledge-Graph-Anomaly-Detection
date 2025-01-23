@@ -11,6 +11,7 @@ from pykeen.models.multimodal.distmult_literal import DistMultLiteral
 from pykeen.models.multimodal.base import LiteralModel
 from pykeen.pipeline import pipeline
 
+
 # variables
 os.environ['OPENAI_API_KEY'] = OPENAI_API_KEY
 client = OpenAI()
@@ -376,10 +377,32 @@ class AttributedKnowledgeGraph(BaseKnowledgeGraph):
 
 class KelpieKnowledgeGraph(BaseKnowledgeGraph):
 
-    kelpie_model = None
-    kelpie_dataset = None
-    
-    pass
+    def __init__(self, *args, **kwargs):
+        
+        super().__init__(*args, **kwargs)
+        
+        self.kelpie_model = self.to_kelpie_model()
+        self.kelpie_dataset = self.to_kelpie_dataset()
+
+    def to_kelpie_model(self):
+        pass
+
+    def to_kelpie_dataset(self):
+        pass
+
+    def train_graph_embeddings(self):
+        self.struct_ent_emb, self.struct_rel_emb = self.train_struct_embeddings()
+        self.llm = self.fine_tune_llm()
+
+    def train_struct_embeddings(self):
+        pass
+
+    def fine_tune_llm(self):
+        pass
+
+    def explain(self):
+        pass
+
 
 # %%
 if __name__ == "__main__":
