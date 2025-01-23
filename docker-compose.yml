@@ -4,7 +4,7 @@ services:
     build: 
       context: .
       dockerfile: Dockerfile
-    container_name: main
+    container_name: kopa
     volumes:
       - .:/app
     tty: true
